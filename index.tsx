@@ -38,6 +38,10 @@ export class GdmLiveAudio extends LitElement {
       right: 0;
       z-index: 10;
       text-align: center;
+      color: white;
+      font-family: sans-serif;
+      font-size: 1.2em;
+      text-shadow: 1px 1px 2px black; /* Make text more readable */
     }
 
     .controls {
@@ -79,6 +83,12 @@ export class GdmLiveAudio extends LitElement {
   constructor() {
     super();
     this.initClient();
+    this.listenForReminders(); // Connect to the reminder service
+    
+    // Request notification permission on load for a better user experience
+    if (Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
   }
 
   private initAudio() {
@@ -105,7 +115,10 @@ export class GdmLiveAudio extends LitElement {
         model: model,
         callbacks: {
           onopen: () => {
-            this.updateStatus('Opened');
+             // Don't overwrite a reminder message with "Opened"
+            if (!this.status.includes('Reminder')) {
+              this.updateStatus('Opened');
+            }
           },
           onmessage: async (message: LiveServerMessage) => {
             const audio =
@@ -155,12 +168,64 @@ export class GdmLiveAudio extends LitElement {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
-            // languageCode: 'en-GB'
           },
         },
       });
     } catch (e) {
       console.error(e);
+    }
+  }
+
+  private listenForReminders() {
+    this.updateStatus('Connecting to reminder service...');
+    
+    // Connect to the SSE endpoint on your FastAPI backend
+    const eventSource = new EventSource('http://localhost:8000/reminders');
+
+    eventSource.onopen = () => {
+      // Clear the initial "connecting" message if no reminder is immediately found
+      if (this.status === 'Connecting to reminder service...') {
+        this.updateStatus(''); 
+      }
+      console.log("✅ Connection to reminder service established.");
+    };
+
+    eventSource.onmessage = (event) => {
+      console.log("Received a reminder event from server:", event.data);
+      const reminder = JSON.parse(event.data);
+      if (reminder.name) {
+        this.handleReminder(reminder);
+      }
+    };
+
+    eventSource.onerror = (err) => {
+      console.error("❌ EventSource connection to backend failed:", err);
+      this.updateError("Could not connect to reminder service.");
+    };
+  }
+
+  private handleReminder(reminder: { name: string; start: string }) {
+    const message = `Reminder: Your meeting "${reminder.name}" is starting in 10 minutes.`;
+    console.log("Handling reminder:", message);
+    this.updateStatus(message);
+
+    // Show desktop notification
+    if (Notification.permission === 'granted') {
+      new Notification('Meeting Reminder', {
+        body: message,
+        icon: '/favicon.ico'
+      });
+    }
+
+    // Speak the reminder
+    try {
+      // Cancel any prior speech to prevent it from getting stuck
+      window.speechSynthesis.cancel(); 
+      const utterance = new SpeechSynthesisUtterance(message);
+      window.speechSynthesis.speak(utterance);
+      console.log("📢 Speaking reminder.");
+    } catch (e) {
+      console.error("Speech synthesis failed:", e);
     }
   }
 
@@ -177,7 +242,9 @@ export class GdmLiveAudio extends LitElement {
       return;
     }
 
+    // KEY FIX: Resume audio contexts after a user click to enable audio playback.
     this.inputAudioContext.resume();
+    this.outputAudioContext.resume(); 
 
     this.updateStatus('Requesting microphone access...');
 
@@ -203,10 +270,8 @@ export class GdmLiveAudio extends LitElement {
 
       this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
         if (!this.isRecording) return;
-
         const inputBuffer = audioProcessingEvent.inputBuffer;
         const pcmData = inputBuffer.getChannelData(0);
-
         this.session.sendRealtimeInput({media: createBlob(pcmData)});
       };
 
@@ -227,7 +292,6 @@ export class GdmLiveAudio extends LitElement {
       return;
 
     this.updateStatus('Stopping recording...');
-
     this.isRecording = false;
 
     if (this.scriptProcessorNode && this.sourceNode && this.inputAudioContext) {
@@ -298,7 +362,7 @@ export class GdmLiveAudio extends LitElement {
           </button>
         </div>
 
-        <div id="status"> ${this.error} </div>
+        <div id="status"> ${this.error || this.status} </div>
         <gdm-live-audio-visuals-3d
           .inputNode=${this.inputNode}
           .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
